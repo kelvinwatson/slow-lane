@@ -42,11 +42,15 @@
     position: fixed; z-index: 1000; left: 0; right: 0; bottom: 0;
     background: var(--paper);
     border-radius: 18px 18px 0 0;
-    padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
+    padding: 6px 16px calc(env(safe-area-inset-bottom, 0px) + 10px);
     box-shadow: 0 -6px 24px rgba(0,0,0,.2);
   }
-  .status { margin: 0 0 10px; font-size: .95rem; color: var(--muted); min-height: 1.3em; }
-  .legend { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+  .bar { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; }
+  .status { flex: 1; min-width: 0; margin: 0; font-size: .9rem; color: var(--muted); line-height: 1.25; }
+  button.info { flex: none; min-height: 44px; padding: 0 12px; border-width: 0; font-size: .9rem; text-decoration: underline; }
+  .more { max-height: 45vh; overflow-y: auto; margin: 0 0 10px; }
+  .more[hidden] { display: none; }
+  .legend { list-style: none; margin: 0 0 4px; padding: 0; display: grid; gap: 8px; }
   .legend li { display: flex; align-items: center; gap: 12px; font-size: 1rem; line-height: 1.25; }
   .swatch { flex: none; width: 36px; height: 0; border-top: 5px solid var(--stop); border-radius: 3px; }
   .swatch.check { border-top: 5px dashed var(--check); }
@@ -70,16 +74,21 @@
 <div id="alert" class="alert" role="alert"></div>
 
 <section class="sheet" aria-label="Map key and controls">
-  <p id="status" class="status" aria-live="polite">Loading map…</p>
-  <ul class="legend">
-    <li><span class="swatch"></span><span>Autobahn or Kraftfahrstraße: not for a 45 km/h moped</span></li>
-    <li><span class="swatch check"></span><span>Trunk road: may be a Kraftfahrstraße, check the signs</span></li>
-  </ul>
+  <div class="bar">
+    <p id="status" class="status" aria-live="polite">Loading map…</p>
+    <button id="info" class="info" aria-expanded="false" aria-controls="more">Key and info</button>
+  </div>
+  <div id="more" class="more" hidden>
+    <ul class="legend">
+      <li><span class="swatch"></span><span>Autobahn or Kraftfahrstraße: not for a 45 km/h moped</span></li>
+      <li><span class="swatch check"></span><span>Trunk road: may be a Kraftfahrstraße, check the signs</span></li>
+    </ul>
+    <p class="disclaimer">Slowlane is a guide, not a legal or safety authority. Its data comes from OpenStreetMap and may be incomplete or out of date. Always follow road signs and traffic rules, and don't use your phone while riding.</p>
+  </div>
   <div class="row">
     <button id="locate" aria-pressed="false">Follow my location</button>
     <button id="wake" aria-pressed="false">Keep screen on</button>
   </div>
-  <p class="disclaimer">Slowlane is a guide, not a legal or safety authority. Its data comes from OpenStreetMap and may be incomplete or out of date. Always follow road signs and traffic rules, and don't use your phone while riding.</p>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -348,6 +357,19 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && wakeBtn.getAttribute('aria-pressed') === 'true') requestWake();
   });
+
+  // ---- Key and info panel: open on the first visit so the disclaimer is seen, then collapsed ----
+  const infoBtn = document.getElementById('info');
+  const moreEl = document.getElementById('more');
+  function setInfo(open) {
+    moreEl.hidden = !open;
+    infoBtn.setAttribute('aria-expanded', String(open));
+    infoBtn.textContent = open ? 'Hide info' : 'Key and info';
+  }
+  infoBtn.addEventListener('click', () => setInfo(moreEl.hidden));
+  let seen = false;
+  try { seen = !!localStorage.getItem('slowlane:seen'); localStorage.setItem('slowlane:seen', '1'); } catch (_) {}
+  setInfo(!seen);
 
   // ---- Offline shell ----
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
