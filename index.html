@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Slowlane</title>
+<meta name="theme-color" content="#1b2a3a">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --ink: #1b2a3a;
+    --paper: #f3f6f4;
+    --line: #d5ddd8;
+    --go: #1f7a4d;
+    --stop: #d7263d;
+    --check: #e08a00;
+    --muted: #5b6b78;
+    font-family: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--ink); color: var(--ink); }
+  #map { position: fixed; inset: 0; background: #e8ecea; }
+
+  .alert {
+    position: fixed; z-index: 1000;
+    top: calc(env(safe-area-inset-top, 0px) + 10px); left: 10px; right: 10px;
+    padding: 14px 16px; border-radius: 12px;
+    font-size: 1.1rem; font-weight: 700; line-height: 1.3;
+    color: #fff; box-shadow: 0 4px 16px rgba(0,0,0,.28);
+    display: none;
+  }
+  .alert.stop { display: block; background: var(--stop); }
+  .alert.check { display: block; background: var(--check); color: #1b1200; }
+
+  .sheet {
+    position: fixed; z-index: 1000; left: 0; right: 0; bottom: 0;
+    background: var(--paper);
+    border-radius: 18px 18px 0 0;
+    padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 14px);
+    box-shadow: 0 -6px 24px rgba(0,0,0,.2);
+  }
+  .status { margin: 0 0 10px; font-size: .95rem; color: var(--muted); min-height: 1.3em; }
+  .legend { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+  .legend li { display: flex; align-items: center; gap: 12px; font-size: 1rem; line-height: 1.25; }
+  .swatch { flex: none; width: 36px; height: 0; border-top: 5px solid var(--stop); border-radius: 3px; }
+  .swatch.check { border-top: 5px dashed var(--check); }
+  .row { display: flex; gap: 8px; }
+  button {
+    flex: 1; font: inherit; font-weight: 700;
+    min-height: 48px; padding: 0 14px;
+    border-radius: 12px; border: 2px solid var(--ink);
+    background: transparent; color: var(--ink);
+  }
+  button[aria-pressed="true"] { background: var(--go); border-color: var(--go); color: #fff; }
+  button:focus-visible { outline: 3px solid var(--go); outline-offset: 2px; }
+  .disclaimer { margin: 10px 0 0; font-size: .8rem; line-height: 1.35; color: var(--muted); }
+  .leaflet-control-attribution { font-size: 10px; }
+  .leaflet-bottom { bottom: 0; }
+  .me { filter: drop-shadow(0 0 4px rgba(27,42,58,.5)); }
+</style>
+</head>
+<body>
+<div id="map" aria-label="Map"></div>
+<div id="alert" class="alert" role="alert"></div>
+
+<section class="sheet" aria-label="Map key and controls">
+  <p id="status" class="status" aria-live="polite">Loading map…</p>
+  <ul class="legend">
+    <li><span class="swatch"></span><span>Autobahn or Kraftfahrstraße: not for a 45 km/h moped</span></li>
+    <li><span class="swatch check"></span><span>Trunk road: may be a Kraftfahrstraße, check the signs</span></li>
+  </ul>
+  <div class="row">
+    <button id="locate" aria-pressed="false">Follow my location</button>
+    <button id="wake" aria-pressed="false">Keep screen on</button>
+  </div>
+  <p class="disclaimer">Slowlane is a guide, not a legal or safety authority. Its data comes from OpenStreetMap and may be incomplete or out of date. Always follow road signs and traffic rules, and don't use your phone while riding.</p>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+(() => {
+  const OVERPASS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter'
+  ];
+  const MIN_ZOOM = 12;          // below this the query area gets too big
+  const WARN_METERS = 80;       // distance at which the banner appears
+  const STORE_KEY = 'slowlane:ways:v1';
+  const COVER_KEY = 'slowlane:cover:v1';
+  const STORE_CAP = 4000;       // keep localStorage small
+  const COVER_MAX = 40;         // remembered loaded areas
+  const COVER_TTL = 7 * 864e5;  // reload an area after a week
+  const MIN_HALF_DEG = 0.012;   // always query at least ~2.6 km tall, so riding does not re-query constantly
+  const CLEAR_EXTRA = 30;       // hysteresis: banner clears this much farther out than it appears
+
+  // ---- Map ----
+  const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([52.52, 13.405], 13);
+  L.control.zoom({ position: 'topright' }).addTo(map);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    subdomains: 'abcd', maxZoom: 19
+  }).addTo(map);
+  const layer = L.layerGroup().addTo(map);
+
+  const statusEl = document.getElementById('status');
+  const alertEl = document.getElementById('alert');
+  const setStatus = t => { statusEl.textContent = t; };
+
+  // ---- Road store (id -> {c: 'hard'|'soft', g: [[lat,lon],...]}) ----
+  let store = new Map();
+  try {
+    const raw = localStorage.getItem(STORE_KEY);
+    if (raw) store = new Map(JSON.parse(raw));
+  } catch (_) { store = new Map(); }
+
+  // loaded areas: [{b: [south, west, north, east], t: timestamp}]
+  let cover = [];
+  try {
+    const raw = JSON.parse(localStorage.getItem(COVER_KEY) || '[]');
+    if (Array.isArray(raw)) cover = raw.filter(c => c && Array.isArray(c.b) && c.b.length === 4 && Date.now() - c.t < COVER_TTL);
+  } catch (_) { cover = []; }
+
+  // true if one remembered area contains the whole view [s, w, n, e]
+  function isCovered(v, areas, now) {
+    return areas.some(c => now - c.t < COVER_TTL &&
+      c.b[0] <= v[0] && c.b[1] <= v[1] && c.b[2] >= v[2] && c.b[3] >= v[3]);
+  }
+
+  // After a good response for area b, ways we hold with a node inside b that
+  // the response did not return have been deleted or retagged in OSM.
+  function pruneStale(st, b, seen) {
+    for (const [id, w] of st) {
+      if (seen.has(id)) continue;
+      if (w.g.some(p => p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3])) st.delete(id);
+    }
+  }
+
+  // Over the cap, keep the ways nearest the map centre.
+  function trim(st, cap, lat, lon) {
+    if (st.size <= cap) return st;
+    const dist = w => { const p = w.g[w.g.length >> 1]; return Math.hypot(p[0] - lat, (p[1] - lon) * 0.61); };
+    return new Map([...st.entries()].sort((a, b) => dist(a[1]) - dist(b[1])).slice(0, cap));
+  }
+
+  function persist() {
+    try {
+      const c = map.getCenter();
+      store = trim(store, STORE_CAP, c.lat, c.lng);
+      localStorage.setItem(STORE_KEY, JSON.stringify([...store.entries()]));
+      localStorage.setItem(COVER_KEY, JSON.stringify(cover));
+    } catch (_) { /* storage full or blocked: keep working in memory */ }
+  }
+
+  // hard = never allowed for a 45 km/h moped; soft = trunk road, verify on the signs
+  function classify(t) {
+    const hw = t.highway || '';
+    const motorway = /^motorway/.test(hw);
+    if (t.motorroad === 'no' && !motorway) return null;
+    if (motorway || t.motorroad === 'yes') return 'hard';
+    if (/^trunk/.test(hw)) return 'soft';
+    return null;
+  }
+
+  function draw() {
+    layer.clearLayers();
+    for (const w of store.values()) {
+      const hard = w.c === 'hard';
+      L.polyline(w.g, hard
+        ? { color: '#d7263d', weight: 6, opacity: .9, lineCap: 'round' }
+        : { color: '#e08a00', weight: 5, opacity: .95, dashArray: '9 9' }
+      ).addTo(layer);
+    }
+  }
+
+  // ---- Loading from Overpass ----
+  let controller = null;
+  let timer = null;
+
+  async function load() {
+    if (map.getZoom() < MIN_ZOOM) {
+      setStatus(store.size ? 'Zoom in to load more roads. Showing saved roads.' : 'Zoom in to load roads.');
+      return;
+    }
+    const v = map.getBounds();
+    const view = [v.getSouth(), v.getWest(), v.getNorth(), v.getEast()];
+    if (isCovered(view, cover, Date.now())) {
+      setStatus(`${store.size} road segments loaded.`);
+      return;
+    }
+    // padded area, at least MIN_HALF_DEG around the centre
+    const c = v.getCenter();
+    const halfLat = Math.max((view[2] - view[0]) * 0.6, MIN_HALF_DEG);
+    const halfLon = Math.max((view[3] - view[1]) * 0.6, MIN_HALF_DEG / Math.cos(c.lat * Math.PI / 180));
+    const area = [c.lat - halfLat, c.lng - halfLon, c.lat + halfLat, c.lng + halfLon].map(n => +n.toFixed(4));
+    const bbox = area.join(',');
+    const q = `[out:json][timeout:25];(` +
+      `way["highway"~"^(motorway|motorway_link|trunk|trunk_link)$"](${bbox});` +
+      `way["motorroad"="yes"](${bbox});` +
+      `);out geom tags;`;
+
+    if (controller) controller.abort();
+    controller = new AbortController();
+    setStatus('Loading roads…');
+
+    for (const url of OVERPASS) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          body: 'data=' + encodeURIComponent(q),
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          signal: controller.signal
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const json = await res.json();
+        if (json.remark) throw new Error('Overpass: ' + json.remark); // timeout or runtime error: data may be partial
+        let n = 0;
+        const seen = new Set();
+        for (const el of json.elements || []) {
+          if (el.type !== 'way' || !el.geometry) continue;
+          const cls = classify(el.tags || {});
+          if (!cls) continue;
+          seen.add(el.id);
+          store.delete(el.id); // re-insert so the newest data sits last
+          store.set(el.id, {
+            c: cls,
+            g: el.geometry.map(p => [+p.lat.toFixed(5), +p.lon.toFixed(5)])
+          });
+          n++;
+        }
+        pruneStale(store, area, seen);
+        cover.push({ b: area, t: Date.now() });
+        if (cover.length > COVER_MAX) cover = cover.slice(-COVER_MAX);
+        persist();
+        draw();
+        setStatus(store.size ? `${store.size} road segments loaded.` : 'No restricted roads in this area.');
+        return;
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+      }
+    }
+    draw();
+    setStatus(store.size
+      ? 'Offline or Overpass is busy. Showing saved roads.'
+      : 'Could not load roads. Check your connection and move the map to retry.');
+  }
+
+  map.on('moveend', () => { clearTimeout(timer); timer = setTimeout(load, 600); });
+  draw();
+  load();
+
+  // ---- Distance to the nearest flagged road ----
+  // returns the distance in metres to the nearest hard and nearest soft road
+  function nearest(lat, lon) {
+    const mx = 111320 * Math.cos(lat * Math.PI / 180), my = 110540;
+    const best = { hard: Infinity, soft: Infinity };
+    for (const w of store.values()) {
+      const g = w.g;
+      for (let i = 0; i < g.length - 1; i++) {
+        const ax = (g[i][1] - lon) * mx, ay = (g[i][0] - lat) * my;
+        const bx = (g[i + 1][1] - lon) * mx, by = (g[i + 1][0] - lat) * my;
+        const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+        const t = l2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / l2)) : 0;
+        const d = Math.hypot(ax + t * dx, ay + t * dy);
+        if (d < best[w.c]) best[w.c] = d;
+      }
+    }
+    return best;
+  }
+
+  // Which banner to show. A red road wins over an amber one. The banner appears
+  // inside the threshold (widened by GPS error) and clears CLEAR_EXTRA farther out,
+  // so it does not flicker at the edge. `shown` is the class currently on screen.
+  function pickAlert(near, accuracy, shown) {
+    const slack = Math.min(accuracy || 0, 50);
+    const limit = c => WARN_METERS + slack + (shown === c ? CLEAR_EXTRA : 0);
+    if (near.hard < limit('hard')) return { c: 'hard', d: near.hard };
+    if (near.soft < limit('soft')) return { c: 'soft', d: near.soft };
+    return null;
+  }
+
+  let shownClass = null;
+  function updateAlert(lat, lon, accuracy) {
+    const a = pickAlert(nearest(lat, lon), accuracy, shownClass);
+    shownClass = a ? a.c : null;
+    if (!a) { alertEl.className = 'alert'; alertEl.textContent = ''; return; }
+    const m = Math.round(a.d / 10) * 10;
+    alertEl.className = 'alert ' + (a.c === 'hard' ? 'stop' : 'check');
+    alertEl.textContent = a.c === 'hard'
+      ? (a.d < 15 ? 'You may be on a road closed to you.' : `Road closed to you, ${m} m away. Don't enter.`)
+      : `Trunk road ${m} m away. Check the signs.`;
+  }
+
+  // ---- Location ----
+  const locateBtn = document.getElementById('locate');
+  let watchId = null, marker = null, ring = null;
+
+  function onPosition(pos) {
+    const { latitude: lat, longitude: lon, accuracy } = pos.coords;
+    const ll = [lat, lon];
+    if (!marker) {
+      marker = L.circleMarker(ll, { radius: 9, color: '#fff', weight: 3, fillColor: '#1f7a4d', fillOpacity: 1, className: 'me' }).addTo(map);
+      ring = L.circle(ll, { radius: accuracy, color: '#1f7a4d', weight: 1, fillOpacity: .08 }).addTo(map);
+    } else {
+      marker.setLatLng(ll); ring.setLatLng(ll).setRadius(accuracy);
+    }
+    map.setView(ll, Math.max(map.getZoom(), 16), { animate: true });
+    updateAlert(lat, lon, accuracy);
+  }
+
+  function stopLocate() {
+    if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+    locateBtn.setAttribute('aria-pressed', 'false');
+    shownClass = null;
+    alertEl.className = 'alert';
+    if (marker) { map.removeLayer(marker); map.removeLayer(ring); marker = ring = null; }
+  }
+
+  locateBtn.addEventListener('click', () => {
+    if (watchId !== null) { stopLocate(); return; }
+    if (!('geolocation' in navigator)) { setStatus('This browser has no location access.'); return; }
+    locateBtn.setAttribute('aria-pressed', 'true');
+    watchId = navigator.geolocation.watchPosition(onPosition, err => {
+      setStatus(err.code === 1 ? 'Location is blocked. Allow it in your browser settings.' : 'Could not get your location.');
+      stopLocate();
+    }, { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 });
+  });
+
+  // ---- Keep screen on ----
+  const wakeBtn = document.getElementById('wake');
+  let wakeLock = null;
+  async function requestWake() {
+    try { wakeLock = await navigator.wakeLock.request('screen'); }
+    catch (_) { wakeBtn.setAttribute('aria-pressed', 'false'); setStatus('Could not keep the screen on.'); }
+  }
+  wakeBtn.addEventListener('click', async () => {
+    if (!('wakeLock' in navigator)) { setStatus('This browser can\'t keep the screen on.'); return; }
+    if (wakeLock) { await wakeLock.release(); wakeLock = null; wakeBtn.setAttribute('aria-pressed', 'false'); return; }
+    wakeBtn.setAttribute('aria-pressed', 'true');
+    requestWake();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wakeBtn.getAttribute('aria-pressed') === 'true') requestWake();
+  });
+
+  // ---- Offline shell ----
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+})();
+</script>
+</body>
+</html>
