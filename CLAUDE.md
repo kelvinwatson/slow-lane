@@ -6,7 +6,7 @@ A small PWA that shows which roads a German 45 km/h moped (Klasse AM, Versicheru
 Google Maps, Waze and most nav apps only offer "avoid highways". That does not cover Kraftfahrstraßen (blue sign, white car), which 45 km/h vehicles also cannot use. Slowlane draws those roads on a map and warns when the rider is close to one. It is an overlay and warning tool, not a router.
 
 ## Current state (v0.1, untested against live data)
-Everything is in `index.html`, with no build step. Leaflet 1.9.4 from cdnjs, CARTO light raster tiles, Atkinson Hyperlegible from Google Fonts.
+Everything is in `index.html`, with no build step. Leaflet 1.9.4 from cdnjs, OpenStreetMap standard raster tiles (CARTO's free basemaps now require an API key; OSM's tile policy allows light personal use, so switch provider if usage grows), Atkinson Hyperlegible from Google Fonts.
 
 - On map move (debounced, zoom 12 or higher) it POSTs an Overpass query for the padded viewport:
   `highway=motorway|motorway_link|trunk|trunk_link` plus `motorroad=yes`, `out geom tags`.
